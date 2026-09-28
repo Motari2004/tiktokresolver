@@ -82,6 +82,44 @@
     .error { color: #ff6b6b; }
     .spinner { color: #888; }
 
+    /* --- Caption block --- */
+    .caption-label {
+      margin-top: 20px;
+      font-size: 13px;
+      color: #888;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .caption-box {
+      margin-top: 6px;
+      padding: 14px;
+      background: #1a1a1c;
+      border: 1px solid #333;
+      border-radius: 8px;
+      font-size: 14px;
+      line-height: 1.6;
+      color: #e8e8e8;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 260px;
+      overflow-y: auto;
+    }
+
+    .caption-box::-webkit-scrollbar { width: 8px; }
+    .caption-box::-webkit-scrollbar-track { background: #1a1a1c; }
+    .caption-box::-webkit-scrollbar-thumb {
+      background: #333;
+      border-radius: 4px;
+    }
+
+    .caption-empty {
+      color: #666;
+      font-style: italic;
+    }
+
+    /* --- URL block --- */
     .url-label {
       margin-top: 16px;
       font-size: 13px;
@@ -130,7 +168,7 @@
 </head>
 <body>
   <h1>TikTok No-Watermark Downloader</h1>
-  <p class="sub">Paste a TikTok link and get the direct MP4 URL.</p>
+  <p class="sub">Paste a TikTok link and get the direct MP4 URL + caption.</p>
 
   <div class="row">
     <input id="url" placeholder="https://www.tiktok.com/@user/video/..." />
@@ -148,13 +186,23 @@
       if (e.key === 'Enter') resolve();
     });
 
+    // Escape HTML to avoid injecting raw content into the DOM
+    function escapeHtml(str) {
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
     async function resolve() {
       const url = input.value.trim();
       if (!url) return;
 
       btn.disabled = true;
       result.className = 'spinner';
-      result.textContent = 'Resolving...';
+      result.textContent = 'Resolving... (caption may take a few seconds)';
 
       try {
         const res = await fetch('/api/resolve', {
@@ -165,17 +213,28 @@
         const data = await res.json();
 
         if (res.ok && data.status === 'ok') {
+          const captionHtml = data.caption
+            ? `<div class="caption-box">${escapeHtml(data.caption)}</div>`
+            : `<div class="caption-box caption-empty">No caption available for this video.</div>`;
+
           result.className = '';
           result.innerHTML = `
             <div>✅ Direct link captured:</div>
-            <a class="download" href="${data.download_url}" target="_blank" rel="noopener">
+            <a class="download" href="${escapeHtml(data.download_url)}" target="_blank" rel="noopener">
               Download video
             </a>
+
+            <div class="caption-label">
+              📝 Caption
+              ${data.caption ? `<button class="copy-btn" onclick="copyCaption(this)">Copy</button>` : ''}
+            </div>
+            ${captionHtml}
+
             <div class="url-label">
               Direct URL:
               <button class="copy-btn" onclick="copyUrl(this)">Copy</button>
             </div>
-            <pre class="url-box">${data.download_url}</pre>
+            <pre class="url-box">${escapeHtml(data.download_url)}</pre>
           `;
         } else {
           result.className = 'error';
@@ -192,6 +251,17 @@
     function copyUrl(btn) {
       const url = btn.parentElement.nextElementSibling.textContent;
       navigator.clipboard.writeText(url).then(() => {
+        btn.textContent = 'Copied!';
+        setTimeout(() => btn.textContent = 'Copy', 1500);
+      }).catch(() => {
+        btn.textContent = 'Failed';
+        setTimeout(() => btn.textContent = 'Copy', 1500);
+      });
+    }
+
+    function copyCaption(btn) {
+      const caption = btn.parentElement.nextElementSibling.textContent;
+      navigator.clipboard.writeText(caption).then(() => {
         btn.textContent = 'Copied!';
         setTimeout(() => btn.textContent = 'Copy', 1500);
       }).catch(() => {

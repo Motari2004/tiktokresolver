@@ -1,3 +1,11 @@
+import sys
+import asyncio
+
+# Must run before any other asyncio import on Windows so Playwright can
+# spawn Chromium. Safe no-op on Linux/macOS.
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
 import base64
 import json
 import logging
@@ -11,6 +19,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 from downloader import resolve_tiktok
+from transcript import fetch_transcript
 
 # ------------------------------------------------------------------
 # Logging
@@ -26,11 +35,10 @@ logger = logging.getLogger("tikresolver")
 # ------------------------------------------------------------------
 app = FastAPI(
     title="TikTok No-Watermark Resolver",
-    version="1.0.0",
-    description="Resolve TikTok URLs to direct MP4 download links.",
+    version="1.1.0",
+    description="Resolve TikTok URLs to direct MP4 links and transcripts.",
 )
 
-# CORS — allow any origin by default; tighten via env var if needed
 app.add_middleware(
     CORSMiddleware,
     allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
@@ -40,7 +48,6 @@ app.add_middleware(
 
 TEMPLATES = Path(__file__).parent / "templates"
 
-# Optional API key protection (set API_KEY in Render env vars to enable)
 API_KEY = os.getenv("API_KEY")
 
 
@@ -60,7 +67,6 @@ def filename_from_token(url: str) -> str:
 
 
 def check_api_key(request: Request):
-    """Reject requests without a valid X-API-Key when API_KEY is set."""
     if not API_KEY:
         return
     if request.headers.get("x-api-key") != API_KEY:
@@ -83,13 +89,10 @@ async def index():
 
 
 # ------------------------------------------------------------------
-# API v1
+# Resolve — TikTok URL → download link
 # ------------------------------------------------------------------
 @app.post("/api/v1/resolve")
 async def resolve_v1(data: URLInput, request: Request):
-    """
-    Resolve a TikTok URL to a direct download link.
-    """
     check_api_key(request)
 
     if not data.url.strip():
@@ -118,12 +121,57 @@ async def resolve_v1(data: URLInput, request: Request):
     }
 
 
+# ------------------------------------------------------------------
+# Transcript — TikTok URL → spoken text
+# ------------------------------------------------------------------
+@app.post("/api/v1/transcript")
+async def transcript_v1(data: URLInput, request: Request):
+    """
+    Fetch the spoken transcript of a TikTok video via transcript365.com.
+    Never raises — always returns 200 with a status field.
+    """
+    try:
+        check_api_key(request)
+    except HTTPException:
+        raise
+
+    if not data.url.strip():
+        raise HTTPException(status_code=400, detail="Empty URL")
+
+    logger.info("Transcript request: %s", data.url)
+
+    try:
+        text = await fetch_transcript(data.url)
+    except Exception as e:
+        logger.exception("Transcript endpoint crashed for %s", data.url)
+        return {
+            "status": "error",
+            "source_url": data.url,
+            "transcript": "",
+            "error": f"{type(e).__name__}: {e}",
+        }
+
+    if not text:
+        return {
+            "status": "error",
+            "source_url": data.url,
+            "transcript": "",
+            "error": "no transcript captured",
+        }
+
+    return {
+        "status": "ok",
+        "source_url": data.url,
+        "transcript": text,
+        "length": len(text),
+    }
+
+
+# ------------------------------------------------------------------
+# Download proxy — streams the video file
+# ------------------------------------------------------------------
 @app.get("/api/v1/download")
 async def download_v1(url: str, request: Request):
-    """
-    Stream the actual video file through this service.
-    Hides the rapidcdn token and forces a clean filename.
-    """
     check_api_key(request)
 
     if not url.startswith("https://d.rapidcdn.app/v2?token="):
@@ -150,7 +198,57 @@ async def download_v1(url: str, request: Request):
 
 
 # ------------------------------------------------------------------
-# Legacy alias (keeps old callers working)
+# Debug — full pipeline in one call (dev only)
+# ------------------------------------------------------------------
+@app.post("/api/v1/debug/pipeline")
+async def debug_pipeline(data: URLInput, request: Request):
+    """
+    Resolve + transcript for one URL. Useful for local testing.
+    Returns both results plus timing.
+    """
+    import time
+    check_api_key(request)
+
+    result = {"source_url": data.url}
+
+    t0 = time.time()
+    try:
+        link = await resolve_tiktok(data.url)
+        result["resolve"] = {
+            "ok": bool(link),
+            "download_url": link or "",
+            "filename": filename_from_token(link) if link else "",
+            "seconds": round(time.time() - t0, 2),
+        }
+    except Exception as e:
+        result["resolve"] = {
+            "ok": False,
+            "error": f"{type(e).__name__}: {e}",
+            "seconds": round(time.time() - t0, 2),
+        }
+
+    t1 = time.time()
+    try:
+        text = await fetch_transcript(data.url)
+        result["transcript"] = {
+            "ok": bool(text),
+            "length": len(text) if text else 0,
+            "preview": (text[:200] + "…") if text and len(text) > 200 else (text or ""),
+            "seconds": round(time.time() - t1, 2),
+        }
+    except Exception as e:
+        result["transcript"] = {
+            "ok": False,
+            "error": f"{type(e).__name__}: {e}",
+            "seconds": round(time.time() - t1, 2),
+        }
+
+    result["total_seconds"] = round(time.time() - t0, 2)
+    return result
+
+
+# ------------------------------------------------------------------
+# Legacy alias
 # ------------------------------------------------------------------
 @app.post("/api/resolve")
 async def resolve_legacy(data: URLInput, request: Request):
@@ -170,4 +268,9 @@ async def healthz():
 # ------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run(
+        "app:app",
+        host="127.0.0.1",
+        port=8000,
+        reload=False,   # Windows + Playwright: must be False
+    )
