@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>TikTok No-Watermark Downloader</title>
+  <title>TikTok Resolver — Download + Caption</title>
   <style>
     * { box-sizing: border-box; }
 
@@ -103,7 +103,7 @@
       color: #e8e8e8;
       white-space: pre-wrap;
       word-break: break-word;
-      max-height: 260px;
+      max-height: 320px;
       overflow-y: auto;
     }
 
@@ -164,11 +164,17 @@
       background: #333;
       border-radius: 4px;
     }
+
+    .meta {
+      margin-top: 14px;
+      font-size: 12px;
+      color: #777;
+    }
   </style>
 </head>
 <body>
-  <h1>TikTok No-Watermark Downloader</h1>
-  <p class="sub">Paste a TikTok link and get the direct MP4 URL + caption.</p>
+  <h1>TikTok Resolver</h1>
+  <p class="sub">Paste a TikTok link and get the direct MP4 URL + spoken caption.</p>
 
   <div class="row">
     <input id="url" placeholder="https://www.tiktok.com/@user/video/..." />
@@ -186,7 +192,6 @@
       if (e.key === 'Enter') resolve();
     });
 
-    // Escape HTML to avoid injecting raw content into the DOM
     function escapeHtml(str) {
       return String(str)
         .replace(/&/g, '&amp;')
@@ -202,43 +207,81 @@
 
       btn.disabled = true;
       result.className = 'spinner';
-      result.textContent = 'Resolving... (caption may take a few seconds)';
+      result.textContent = 'Resolving… (download + caption, ~10–20s)';
 
+      let downloadData = null;
+      let transcriptData = null;
+
+      // Run both endpoints in parallel
       try {
-        const res = await fetch('/api/resolve', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url })
-        });
-        const data = await res.json();
+        const [dlRes, trRes] = await Promise.allSettled([
+          fetch('/api/v1/resolve', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url }),
+          }),
+          fetch('/api/v1/transcript', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url }),
+          }),
+        ]);
 
-        if (res.ok && data.status === 'ok') {
-          const captionHtml = data.caption
-            ? `<div class="caption-box">${escapeHtml(data.caption)}</div>`
+        // --- parse resolve ---
+        if (dlRes.status === 'fulfilled') {
+          try { downloadData = await dlRes.value.json(); }
+          catch (e) { downloadData = null; }
+        }
+
+        // --- parse transcript ---
+        if (trRes.status === 'fulfilled') {
+          try { transcriptData = await trRes.value.json(); }
+          catch (e) { transcriptData = null; }
+        }
+
+        // --- render ---
+        if (downloadData && downloadData.status === 'ok') {
+          const caption = (transcriptData && transcriptData.status === 'ok' && transcriptData.transcript)
+            ? transcriptData.transcript
+            : '';
+
+          const captionHtml = caption
+            ? `<div class="caption-box">${escapeHtml(caption)}</div>`
             : `<div class="caption-box caption-empty">No caption available for this video.</div>`;
+
+          const transcriptStatus = (transcriptData && transcriptData.status === 'ok')
+            ? `${caption.length} chars`
+            : (transcriptData && transcriptData.error) || 'no transcript';
 
           result.className = '';
           result.innerHTML = `
             <div>✅ Direct link captured:</div>
-            <a class="download" href="${escapeHtml(data.download_url)}" target="_blank" rel="noopener">
+            <a class="download" href="${escapeHtml(downloadData.download_url)}" target="_blank" rel="noopener">
               Download video
             </a>
 
             <div class="caption-label">
               📝 Caption
-              ${data.caption ? `<button class="copy-btn" onclick="copyCaption(this)">Copy</button>` : ''}
+              ${caption ? `<button class="copy-btn" onclick="copyBlock(this)">Copy</button>` : ''}
             </div>
             ${captionHtml}
 
             <div class="url-label">
               Direct URL:
-              <button class="copy-btn" onclick="copyUrl(this)">Copy</button>
+              <button class="copy-btn" onclick="copyBlock(this)">Copy</button>
             </div>
-            <pre class="url-box">${escapeHtml(data.download_url)}</pre>
+            <pre class="url-box">${escapeHtml(downloadData.download_url)}</pre>
+
+            <div class="meta">
+              file: ${escapeHtml(downloadData.filename || '—')}
+              · transcript: ${escapeHtml(transcriptStatus)}
+            </div>
           `;
         } else {
+          const err = (downloadData && downloadData.detail)
+                   || 'Failed to resolve';
           result.className = 'error';
-          result.textContent = '❌ ' + (data.detail || 'Failed to resolve');
+          result.textContent = '❌ ' + err;
         }
       } catch (err) {
         result.className = 'error';
@@ -248,20 +291,14 @@
       }
     }
 
-    function copyUrl(btn) {
-      const url = btn.parentElement.nextElementSibling.textContent;
-      navigator.clipboard.writeText(url).then(() => {
-        btn.textContent = 'Copied!';
-        setTimeout(() => btn.textContent = 'Copy', 1500);
-      }).catch(() => {
-        btn.textContent = 'Failed';
-        setTimeout(() => btn.textContent = 'Copy', 1500);
-      });
-    }
-
-    function copyCaption(btn) {
-      const caption = btn.parentElement.nextElementSibling.textContent;
-      navigator.clipboard.writeText(caption).then(() => {
+    // Copies whichever block this button sits in.
+    // For .caption-label / .url-label the button is inside the label,
+    // and the target text is the next sibling element.
+    function copyBlock(btn) {
+      const target = btn.parentElement.nextElementSibling;
+      if (!target) return;
+      const text = target.textContent;
+      navigator.clipboard.writeText(text).then(() => {
         btn.textContent = 'Copied!';
         setTimeout(() => btn.textContent = 'Copy', 1500);
       }).catch(() => {
